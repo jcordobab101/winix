@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "winix"
+version = "0.4.0"
+description = "Python library and CLI to control Winix air purifiers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "boto3",
+    "requests",
+    "python-dotenv"
+]
+
+[project.scripts]
+winix = "winix.cmd:main"
+winixctl = "winix.cmd:main"

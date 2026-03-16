@@ -1,0 +1,588 @@
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import os
+import sys
+from getpass import getpass
+from pathlib import Path
+from typing import Any, List, Optional
+
+from dotenv import load_dotenv
+
+from winix import WinixAccount, WinixDevice, WinixDeviceStub
+from winix.auth import WinixAuthResponse, login, refresh
+
+
+ENV_PATH = Path(r"F:\admin\.env")
+load_dotenv(ENV_PATH)
+
+DEFAULT_CONFIG_PATH = Path(
+    os.getenv("WINIX_CONFIG_FILE", r"F:\vtx\data\winix_config.json")
+)
+DEFAULT_OUTPUT = (os.getenv("WINIX_OUTPUT_FORMAT") or "text").strip().lower()
+
+
+class UserError(Exception):
+    pass
+
+
+class JSONEncoder(json.JSONEncoder):
+    def default(self, o: Any) -> Any:
+        if dataclasses.is_dataclass(o):
+            return dataclasses.asdict(o)
+        return super().default(o)
+
+
+def _normalize(value: str) -> str:
+    return " ".join((value or "").strip().lower().replace("_", " ").split())
+
+
+def _json_dump(data: Any) -> str:
+    return json.dumps(data, cls=JSONEncoder, indent=2, ensure_ascii=False)
+
+
+def _print_json(data: Any) -> None:
+    print(_json_dump(data))
+
+
+class Configuration:
+    exists: bool
+    cognito: Optional[WinixAuthResponse]
+    devices: List[WinixDeviceStub]
+
+    def __init__(self, config_path: str | Path):
+        self.config_path = Path(config_path).expanduser()
+        self.exists = False
+        self.cognito = None
+        self.devices = []
+        self._load_from_disk()
+
+    def device(self, selector: str) -> WinixDeviceStub:
+        selector_norm = _normalize(selector)
+
+        if not self.devices:
+            raise UserError(
+                "No devices are available in the local Winix configuration. "
+                "Run `winixctl login` or `winixctl refresh` first."
+            )
+
+        if selector_norm.isdigit():
+            idx = int(selector_norm)
+            if 0 <= idx < len(self.devices):
+                return self.devices[idx]
+
+        exact_matches: List[WinixDeviceStub] = []
+        partial_matches: List[WinixDeviceStub] = []
+
+        for i, device in enumerate(self.devices):
+            mac = _normalize(getattr(device, "mac", ""))
+            alias = _normalize(getattr(device, "alias", ""))
+            candidates = {str(i), mac, alias}
+
+            if selector_norm in candidates:
+                exact_matches.append(device)
+                continue
+
+            if selector_norm and (
+                selector_norm in mac or selector_norm in alias
+            ):
+                partial_matches.append(device)
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+
+        if len(exact_matches) > 1:
+            raise UserError(
+                f'Multiple devices exactly matched "{selector}". '
+                "Use a more specific index, MAC, or alias."
+            )
+
+        if len(partial_matches) == 1:
+            return partial_matches[0]
+
+        if len(partial_matches) > 1:
+            names = ", ".join(
+                f'{getattr(d, "alias", "<no alias>")} ({getattr(d, "mac", "<no mac>")})'
+                for d in partial_matches
+            )
+            raise UserError(
+                f'Multiple devices partially matched "{selector}": {names}. '
+                "Use a more specific index, MAC, or alias."
+            )
+
+        raise UserError(
+            f'Could not find device matching "{selector}". '
+            "You can use index, MAC, or alias. "
+            "View the list of available devices with `winixctl devices`."
+        )
+
+    def require_cognito(self) -> WinixAuthResponse:
+        if self.cognito is None:
+            raise UserError(
+                "No Winix authentication is stored locally. "
+                "Run `winixctl login` first."
+            )
+        return self.cognito
+
+    def _load_from_disk(self) -> None:
+        if not self.config_path.exists():
+            self.exists = False
+            self.cognito = None
+            self.devices = []
+            return
+
+        try:
+            js = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise UserError(
+                f"Failed to read Winix config file: {self.config_path} :: {exc}"
+            ) from exc
+
+        self.exists = True
+
+        cognito_data = js.get("cognito")
+        self.cognito = (
+            WinixAuthResponse(**cognito_data)
+            if isinstance(cognito_data, dict)
+            else None
+        )
+
+        self.devices = []
+        for item in js.get("devices", []):
+            if isinstance(item, dict):
+                self.devices.append(WinixDeviceStub(**item))
+
+    def save(self) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "cognito": self.cognito,
+            "devices": self.devices,
+        }
+
+        tmp_path = self.config_path.with_suffix(self.config_path.suffix + ".tmp")
+        tmp_path.write_text(_json_dump(payload), encoding="utf-8")
+        tmp_path.replace(self.config_path)
+
+
+class Cmd:
+    def __init__(self, args: argparse.Namespace, config: Configuration):
+        self.args = args
+        self.config = config
+
+    @property
+    def output(self) -> str:
+        return getattr(self.args, "output", "text")
+
+    def active_device(self) -> WinixDeviceStub:
+        return self.config.device(self.args.device_selector)
+
+    def active_device_id(self) -> str:
+        return self.active_device().id
+
+    def emit(self, data: Any) -> None:
+        if self.output == "json":
+            _print_json(data)
+        else:
+            if isinstance(data, str):
+                print(data)
+            else:
+                print(data)
+
+
+class LoginCmd(Cmd):
+    parser_args = {
+        "name": "login",
+        "help": "Authenticate Winix account",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--username", help="Username (email)", required=False)
+        parser.add_argument("--password", help="Password", required=False)
+        parser.add_argument(
+            "--refresh",
+            dest="refresh",
+            action="store_true",
+            help="Refresh the Winix Cognito token instead of logging in",
+        )
+        parser.add_argument(
+            "--skip-register",
+            action="store_true",
+            help="Skip register_user after login",
+        )
+
+    def execute(self) -> None:
+        if getattr(self.args, "refresh", False):
+            self._refresh()
+        else:
+            self._login()
+
+    def _login(self) -> None:
+        username = (
+            getattr(self.args, "username", None)
+            or os.getenv("WINIX_USERNAME")
+            or input("Username (email): ").strip()
+        )
+        password = (
+            getattr(self.args, "password", None)
+            or os.getenv("WINIX_PASSWORD")
+            or getpass("Password: ")
+        )
+
+        if not username:
+            raise UserError("Username is required.")
+        if not password:
+            raise UserError("Password is required.")
+
+        self.config.cognito = login(username, password)
+
+        account = WinixAccount(self.config.cognito.access_token)
+
+        if not getattr(self.args, "skip_register", False):
+            account.register_user(username)
+
+        account.check_access_token()
+        self.config.devices = account.get_device_info_list()
+        self.config.save()
+
+        if self.output == "json":
+            self.emit(
+                {
+                    "ok": True,
+                    "message": "Authentication successful.",
+                    "device_count": len(self.config.devices),
+                    "config_path": str(self.config.config_path),
+                }
+            )
+        else:
+            self.emit("Authentication successful.")
+
+    def _refresh(self) -> None:
+        cognito = self.config.require_cognito()
+
+        self.config.cognito = refresh(
+            user_id=cognito.user_id,
+            refresh_token=cognito.refresh_token,
+        )
+
+        account = WinixAccount(self.config.cognito.access_token)
+        account.check_access_token()
+        self.config.devices = account.get_device_info_list()
+        self.config.save()
+
+        if self.output == "json":
+            self.emit(
+                {
+                    "ok": True,
+                    "message": "Token refresh successful.",
+                    "device_count": len(self.config.devices),
+                }
+            )
+        else:
+            self.emit("Token refresh successful.")
+
+
+class DevicesCmd(Cmd):
+    parser_args = {
+        "name": "devices",
+        "help": "List registered Winix devices",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--expose",
+            action="store_true",
+            help="Expose the full Device ID",
+        )
+
+    def execute(self) -> None:
+        expose = getattr(self.args, "expose", False)
+
+        if self.output == "json":
+            devices_out = []
+            for i, device in enumerate(self.config.devices):
+                raw_id = getattr(device, "id", "")
+                masked_id = _mask_device_id(raw_id)
+
+                devices_out.append(
+                    {
+                        "index": i,
+                        "default": i == 0,
+                        "device_id": raw_id if expose else masked_id,
+                        "mac": getattr(device, "mac", ""),
+                        "alias": getattr(device, "alias", ""),
+                        "location": getattr(device, "location_code", ""),
+                    }
+                )
+
+            self.emit(
+                {
+                    "ok": True,
+                    "count": len(devices_out),
+                    "devices": devices_out,
+                }
+            )
+            return
+
+        print(f"{len(self.config.devices)} devices:")
+        for i, device in enumerate(self.config.devices):
+            raw_id = getattr(device, "id", "")
+            shown_id = raw_id if expose else _mask_device_id(raw_id) + " (hidden)"
+
+            fields = (
+                ("Device ID", shown_id),
+                ("Mac", getattr(device, "mac", "")),
+                ("Alias", getattr(device, "alias", "")),
+                ("Location", getattr(device, "location_code", "")),
+            )
+
+            label = " (default)" if i == 0 else ""
+            print(f"Device#{i}{label} ".ljust(50, "-"))
+            for field_name, value in fields:
+                print(f"{field_name:>15} : {value}")
+            print("")
+
+        print("Missing a device? You might need to run refresh.")
+
+
+class FanCmd(Cmd):
+    parser_args = {
+        "name": "fan",
+        "help": "Fan speed controls",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "level",
+            help="Fan level",
+            choices=["low", "medium", "high", "turbo", "sleep"],
+        )
+
+    def execute(self) -> None:
+        level = self.args.level
+        device = WinixDevice(self.active_device_id())
+        getattr(device, level)()
+
+        if self.output == "json":
+            self.emit({"ok": True, "action": "fan", "level": level})
+        else:
+            self.emit("ok")
+
+
+class PowerCmd(Cmd):
+    parser_args = {
+        "name": "power",
+        "help": "Power controls",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("state", help="Power state", choices=["on", "off"])
+
+    def execute(self) -> None:
+        state = self.args.state
+        device = WinixDevice(self.active_device_id())
+        getattr(device, state)()
+
+        if self.output == "json":
+            self.emit({"ok": True, "action": "power", "state": state})
+        else:
+            self.emit("ok")
+
+
+class ModeCmd(Cmd):
+    parser_args = {
+        "name": "mode",
+        "help": "Mode controls",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("state", help="Mode state", choices=["auto", "manual"])
+
+    def execute(self) -> None:
+        state = self.args.state
+        device = WinixDevice(self.active_device_id())
+        getattr(device, state)()
+
+        if self.output == "json":
+            self.emit({"ok": True, "action": "mode", "state": state})
+        else:
+            self.emit("ok")
+
+
+class PlasmawaveCmd(Cmd):
+    parser_args = {
+        "name": "plasmawave",
+        "help": "Plasmawave controls",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("state", help="Plasmawave state", choices=["on", "off"])
+
+    def execute(self) -> None:
+        method_name = "plasmawave_on" if self.args.state == "on" else "plasmawave_off"
+        device = WinixDevice(self.active_device_id())
+        getattr(device, method_name)()
+
+        if self.output == "json":
+            self.emit({"ok": True, "action": "plasmawave", "state": self.args.state})
+        else:
+            self.emit("ok")
+
+
+class RefreshCmd(Cmd):
+    parser_args = {
+        "name": "refresh",
+        "help": "Refresh account device metadata",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        pass
+
+    def execute(self) -> None:
+        cognito = self.config.require_cognito()
+        account = WinixAccount(cognito.access_token)
+        self.config.devices = account.get_device_info_list()
+        self.config.save()
+
+        if self.output == "json":
+            self.emit(
+                {
+                    "ok": True,
+                    "message": "Refresh successful.",
+                    "device_count": len(self.config.devices),
+                }
+            )
+        else:
+            self.emit("Refresh successful.")
+
+
+class StateCmd(Cmd):
+    parser_args = {
+        "name": "getstate",
+        "help": "Get device state",
+    }
+
+    @classmethod
+    def add_parser(cls, parser: argparse.ArgumentParser) -> None:
+        pass
+
+    def execute(self) -> None:
+        device = WinixDevice(self.active_device_id())
+        status = getattr(device, "get_state")()
+
+        if self.output == "json":
+            self.emit({"ok": True, "state": status})
+            return
+
+        for field_name, value in status.items():
+            print(f"{field_name:>15} : {value}")
+
+
+def _mask_device_id(device_id: str) -> str:
+    if not isinstance(device_id, str) or not device_id:
+        return "***hidden***"
+
+    if "_" not in device_id:
+        return "***hidden***"
+
+    left, right = device_id.split("_", 1)
+    return f"{left}_{'*' * len(right)}"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Winix Air Purifier Control")
+    parser.add_argument(
+        "--device",
+        "-D",
+        help="Device index, MAC, or alias to use",
+        default="0",
+        dest="device_selector",
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to Winix config file",
+        default=str(DEFAULT_CONFIG_PATH),
+        dest="config_path",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default=DEFAULT_OUTPUT if DEFAULT_OUTPUT in {"text", "json"} else "text",
+        help="Output format",
+    )
+
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    commands = {
+        cls.parser_args["name"]: cls
+        for cls in (
+            LoginCmd,
+            RefreshCmd,
+            DevicesCmd,
+            StateCmd,
+            FanCmd,
+            PowerCmd,
+            ModeCmd,
+            PlasmawaveCmd,
+        )
+    }
+
+    for cls in commands.values():
+        sub = subparsers.add_parser(**cls.parser_args)
+        cls.add_parser(sub)
+
+    parser.set_defaults(_commands=commands)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    cmd = args.cmd
+
+    if cmd is None:
+        parser.print_help()
+        return 0
+
+    commands = getattr(args, "_commands", {})
+    cls = commands[cmd]
+
+    try:
+        config = Configuration(args.config_path)
+        cls(args, config=config).execute()
+        return 0
+
+    except UserError as exc:
+        if getattr(args, "output", "text") == "json":
+            _print_json({"ok": False, "error": str(exc)})
+        else:
+            print(str(exc), file=sys.stderr)
+        return 1
+
+    except KeyboardInterrupt:
+        if getattr(args, "output", "text") == "json":
+            _print_json({"ok": False, "error": "Interrupted"})
+        else:
+            print("Interrupted", file=sys.stderr)
+        return 130
+
+    except Exception as exc:
+        message = f"Unexpected error: {exc}"
+        if getattr(args, "output", "text") == "json":
+            _print_json({"ok": False, "error": message})
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
