@@ -236,6 +236,11 @@ class LoginCmd(Cmd):
             action="store_true",
             help="Skip register_user after login",
         )
+        parser.add_argument(
+            "--skip-check",
+            action="store_true",
+            help="Skip check_access_token after login",
+        )
 
     def execute(self) -> None:
         if getattr(self.args, "refresh", False):
@@ -260,18 +265,38 @@ class LoginCmd(Cmd):
         if not password:
             raise UserError("Password is required.")
 
+        steps: dict[str, Any] = {
+            "login": False,
+            "register_user": False,
+            "check_access_token": False,
+            "get_device_info_list": False,
+        }
+
         try:
             self.config.cognito = login(username, password)
+            steps["login"] = True
+
             account = WinixAccount(self.config.cognito.access_token)
 
             if not getattr(self.args, "skip_register", False):
                 account.register_user(username)
+                steps["register_user"] = True
+            else:
+                steps["register_user"] = "skipped"
 
-            account.check_access_token()
+            if not getattr(self.args, "skip_check", False):
+                account.check_access_token()
+                steps["check_access_token"] = True
+            else:
+                steps["check_access_token"] = "skipped"
+
             self.config.devices = account.get_device_info_list()
+            steps["get_device_info_list"] = True
+
             self.config.save()
+
         except (WinixAuthError, WinixDriverError) as exc:
-            raise UserError(str(exc)) from exc
+            raise UserError(f"{exc} | steps={steps}") from exc
 
         self.emit(
             {
@@ -279,6 +304,7 @@ class LoginCmd(Cmd):
                 "message": "Authentication successful.",
                 "device_count": len(self.config.devices),
                 "config_path": str(self.config.config_path),
+                "steps": steps,
             }
             if self.output == "json"
             else "Authentication successful."
