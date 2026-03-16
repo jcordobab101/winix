@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -13,10 +14,22 @@ from botocore.client import Config
 
 
 # Pulled from Winix Home v1.0.8 APK
-COGNITO_APP_CLIENT_ID = "14og512b9u20b8vrdm55d8empi"
-COGNITO_CLIENT_SECRET_KEY = "k554d4pvgf2n0chbhgtmbe4q0ul4a9flp3pcl6a47ch6rripvvr"
-COGNITO_USER_POOL_ID = "us-east-1_Ofd50EosD"
-COGNITO_REGION = "us-east-1"
+COGNITO_APP_CLIENT_ID = os.getenv(
+    "WINIX_COGNITO_APP_CLIENT_ID",
+    "14og512b9u20b8vrdm55d8empi",
+)
+COGNITO_CLIENT_SECRET_KEY = os.getenv(
+    "WINIX_COGNITO_CLIENT_SECRET_KEY",
+    "k554d4pvgf2n0chbhgtmbe4q0ul4a9flp3pcl6a47ch6rripvvr",
+)
+COGNITO_USER_POOL_ID = os.getenv(
+    "WINIX_COGNITO_USER_POOL_ID",
+    "us-east-1_Ofd50EosD",
+)
+COGNITO_REGION = os.getenv(
+    "WINIX_COGNITO_REGION",
+    "us-east-1",
+)
 
 
 class WinixAuthError(RuntimeError):
@@ -43,6 +56,8 @@ def login(username: str, password: str, **kwargs: Any) -> WinixAuthResponse:
     if not isinstance(password, str) or not password.strip():
         raise WinixAuthError("password must be a non-empty string")
 
+    username = username.strip()
+
     client_id = kwargs.get("client_id", COGNITO_APP_CLIENT_ID)
     client_secret = kwargs.get("client_secret", COGNITO_CLIENT_SECRET_KEY)
     pool_id = kwargs.get("pool_id", COGNITO_USER_POOL_ID)
@@ -57,14 +72,13 @@ def login(username: str, password: str, **kwargs: Any) -> WinixAuthResponse:
 
     try:
         wl = WarrantLite(
-            username=username.strip(),
+            username=username,
             password=password,
             pool_id=pool_id,
             client_id=client_id,
             client_secret=client_secret,
             client=_boto_client(pool_region),
         )
-
         resp = wl.authenticate_user()
     except Exception as exc:
         raise WinixAuthError(f"Winix SRP login failed: {exc}") from exc
@@ -97,6 +111,8 @@ def refresh(user_id: str, refresh_token: str, **kwargs: Any) -> WinixAuthRespons
     if not isinstance(refresh_token, str) or not refresh_token.strip():
         raise WinixAuthError("refresh_token must be a non-empty string")
 
+    user_id = user_id.strip()
+
     client_id = kwargs.get("client_id", COGNITO_APP_CLIENT_ID)
     client_secret = kwargs.get("client_secret", COGNITO_CLIENT_SECRET_KEY)
     pool_region = kwargs.get("pool_region", COGNITO_REGION)
@@ -104,7 +120,7 @@ def refresh(user_id: str, refresh_token: str, **kwargs: Any) -> WinixAuthRespons
     auth_params = {
         "REFRESH_TOKEN": refresh_token,
         "SECRET_HASH": _secret_hash(
-            username=user_id.strip(),
+            username=user_id,
             client_id=client_id,
             client_secret=client_secret,
         ),
@@ -124,7 +140,7 @@ def refresh(user_id: str, refresh_token: str, **kwargs: Any) -> WinixAuthRespons
     id_token = auth_result["IdToken"]
 
     return WinixAuthResponse(
-        user_id=user_id.strip(),
+        user_id=user_id,
         access_token=access_token,
         refresh_token=refresh_token,
         id_token=id_token,

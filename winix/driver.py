@@ -212,6 +212,14 @@ class WinixAccount:
         if not isinstance(data, dict):
             raise WinixResponseError(f"{rpc_name} returned unexpected payload type")
 
+        result_code = str(data.get("resultCode", "")).strip()
+        result_message = str(data.get("resultMessage", "")).strip()
+
+        if result_code and result_code != "200":
+            raise WinixResponseError(
+                f"{rpc_name} returned resultCode={result_code}: {result_message or data}"
+            )
+
         return data
 
 
