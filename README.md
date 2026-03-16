@@ -1,88 +1,6 @@
 # winix
-Modern Winix Integration
-# Winix Controller
 
-This is a Python library for controlling Winix C545 Air Purifier
-devices. I reverse-engineered the API calls from the Android app. There
-are a few weird idiosyncrasies with the Winix backends.
-
-Included in this package is a CLI program `winixctl`.
-
-## Setup
-
-Install using PyPI: `pip install winix`.
-You then have access to the `winix` module in python as well
-as the `winixctl` command for shell (which uses the library).
-
-## `winixctl` CLI
-
-```
-$ winixctl
-usage: winixctl [-h] [--device DEVICE_SELECTOR] {login,refresh,devices,getstate,fan,power,mode,plasmawave} ...
-
-Winix C545 Air Purifier Control
-
-positional arguments:
-  {login,refresh,devices,getstate,fan,power,mode,plasmawave}
-    login               Authenticate Winix account
-    refresh             Refresh account device metadata
-    devices             List registered Winix devices
-    getstate            Get device state
-    fan                 Fan speed controls
-    power               Power controls
-    mode                Mode controls
-    plasmawave          Plasmawave controls
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --device DEVICE_SELECTOR, -D DEVICE_SELECTOR
-                        Device Index/Mac/Alias to use
-```
-
-In order to control your device, you first must run `winixctl login`.
-this will save a token from the Winix backend in a file on your system
-at `~/config/winix/config.json`. It will prompt you for a username
-and password. You can use the `--username` and `--password` flags as well.
-
-
-You can see the devives registered to your winix account
-with `winixctl devices`.
-
-    ~/dev/winix(master*) » winixctl devices
-    1 devices:
-    Device#0 (default) -------------------------------
-          Device ID : 123456abcde_********** (hidden)
-                Mac : 123456abcde
-              Alias : Bedroom
-           Location : SROU
-
-    Missing a device? You might need to run refresh.
-
-The last portion of the Device ID is hidden as it can be used to control
-the device.
-
-### Multi-device Support
-
-By default the commands will work on the first device you have in your Winix account. If you
-have multiple air purifiers, you can specify which device to use by specifying
-a value for the top-level `--device` flag (short: `-D`).
-
-You may specify one of:
-- The device **index**. Example: `0` _(the default device selector)_.
-- The device **mac**. Example: `123456abcde`. Mac values stay the same between device registration.
-    If you have a device that you move between Wifi networks frequently then you will want
-    to use this.
-- The device **alias**. Example: `bedroom`. This is the most human-friendly version.
-
-
-**Examples**
-
-Turn off the bedroom air purifier _using an alias as the selector_:
-
-    winixctl -D bedroom power off
-# Winix Controller
-
-Python library and CLI for controlling **Winix air purifiers** (such as the C545).
+Modern Winix integration for controlling Winix air purifiers from Python and the command line.
 
 This project reverse-engineers the Winix mobile API and provides:
 
@@ -92,7 +10,7 @@ This project reverse-engineers the Winix mobile API and provides:
 - Multi-device support
 - JSON output for automation systems
 
-This tool allows programmatic control of Winix air purifiers without relying on the official mobile application.
+This tool allows programmatic control of compatible Winix air purifiers without relying on the official mobile application.
 
 ---
 
@@ -128,7 +46,7 @@ pip install -e .
 # CLI Usage
 
 ```bash
-winixctl [-h] [--device DEVICE_SELECTOR] {login,refresh,devices,getstate,fan,power,mode,plasmawave}
+winixctl [-h] [--device DEVICE_SELECTOR] [--config CONFIG_PATH] [--output {text,json}] {login,refresh,devices,getstate,fan,power,mode,plasmawave}
 ```
 
 Commands:
@@ -140,15 +58,15 @@ Commands:
 | `devices` | List registered devices |
 | `getstate` | Get device status |
 | `fan` | Set fan speed |
-| `power` | Turn purifier on/off |
-| `mode` | Set auto/manual mode |
-| `plasmawave` | Enable/disable Plasmawave |
+| `power` | Turn purifier on or off |
+| `mode` | Set auto or manual mode |
+| `plasmawave` | Enable or disable Plasmawave |
 
 ---
 
 # Authentication
 
-Before using the device you must login.
+Before using the device you must log in.
 
 ```bash
 winixctl login
@@ -156,12 +74,18 @@ winixctl login
 
 You will be prompted for:
 
-```
+```text
 Username (email)
 Password
 ```
 
-The tool retrieves a **Cognito access token** and stores it locally.
+The tool retrieves a Cognito access token and stores it locally for later use.
+
+You can also provide credentials directly:
+
+```bash
+winixctl login --username you@example.com --password yourpassword
+```
 
 ---
 
@@ -171,17 +95,23 @@ The token and device metadata are saved locally.
 
 Default location:
 
-```
-~/.config/winix/config.json
+```text
+F:\vtx\data\winix_config.json
 ```
 
-You may override the location with an environment variable:
+You may override the location with:
 
-```
+```text
 WINIX_CONFIG_FILE
 ```
 
 Example:
+
+```bash
+set WINIX_CONFIG_FILE=F:\custom\winix_config.json
+```
+
+or on Unix-like systems:
 
 ```bash
 export WINIX_CONFIG_FILE=/data/winix/config.json
@@ -193,15 +123,16 @@ export WINIX_CONFIG_FILE=/data/winix/config.json
 
 Credentials can also be stored in `.env`.
 
-Example `.env` file:
+Example:
 
-```
+```text
 WINIX_USERNAME=user@email.com
 WINIX_PASSWORD=yourpassword
-WINIX_CONFIG_FILE=/data/winix/config.json
+WINIX_CONFIG_FILE=F:\vtx\data\winix_config.json
+WINIX_OUTPUT_FORMAT=json
 ```
 
-This allows **non-interactive authentication**, useful for automation systems.
+This allows non-interactive authentication and easier automation.
 
 ---
 
@@ -213,7 +144,7 @@ winixctl devices
 
 Example output:
 
-```
+```text
 1 devices:
 
 Device#0 (default)
@@ -224,7 +155,7 @@ Alias     : Bedroom
 Location  : SROU
 ```
 
-The last part of the device ID is hidden since it can be used to control the device.
+The last part of the device ID is hidden because it can be used to control the device.
 
 ---
 
@@ -270,7 +201,7 @@ winixctl fan turbo
 
 Available speeds:
 
-```
+```text
 low
 medium
 high
@@ -306,7 +237,7 @@ winixctl getstate
 
 Example:
 
-```
+```text
 power        : on
 mode         : auto
 airflow      : medium
@@ -321,16 +252,19 @@ filter_hour  : 241
 For automation systems you can return JSON:
 
 ```bash
-winixctl getstate --output json
+winixctl --output json getstate
 ```
 
 Example:
 
 ```json
 {
-  "power": "on",
-  "mode": "auto",
-  "airflow": "medium"
+  "ok": true,
+  "state": {
+    "power": "on",
+    "mode": "auto",
+    "airflow": "medium"
+  }
 }
 ```
 
@@ -346,11 +280,9 @@ from winix import login, WinixAccount, WinixDevice
 auth = login("email", "password")
 
 account = WinixAccount(auth.access_token)
-
 devices = account.get_device_info_list()
 
 device = WinixDevice(devices[0].id)
-
 device.turbo()
 ```
 
@@ -362,7 +294,7 @@ Tested with:
 
 - Winix **C545**
 
-Other models using the same cloud API may also work.
+Other Winix models using the same cloud API may also work.
 
 ---
 
