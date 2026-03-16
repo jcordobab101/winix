@@ -33,7 +33,9 @@ class WinixAuthResponse:
 
 def login(username: str, password: str, **kwargs: Any) -> WinixAuthResponse:
     """
-    Generate fresh Cognito credentials using USER_PASSWORD_AUTH.
+    Generate fresh Cognito credentials using SRP authentication.
+
+    This is required for app clients that do not allow USER_PASSWORD_AUTH.
     """
     if not isinstance(username, str) or not username.strip():
         raise WinixAuthError("username must be a non-empty string")
@@ -43,26 +45,29 @@ def login(username: str, password: str, **kwargs: Any) -> WinixAuthResponse:
 
     client_id = kwargs.get("client_id", COGNITO_APP_CLIENT_ID)
     client_secret = kwargs.get("client_secret", COGNITO_CLIENT_SECRET_KEY)
+    pool_id = kwargs.get("pool_id", COGNITO_USER_POOL_ID)
     pool_region = kwargs.get("pool_region", COGNITO_REGION)
 
-    auth_params = {
-        "USERNAME": username.strip(),
-        "PASSWORD": password,
-        "SECRET_HASH": _secret_hash(
-            username=username.strip(),
-            client_id=client_id,
-            client_secret=client_secret,
-        ),
-    }
+    try:
+        from warrant_lite import WarrantLite
+    except Exception as exc:
+        raise WinixAuthError(
+            "warrant_lite is required for SRP login but is not installed."
+        ) from exc
 
     try:
-        resp = _boto_client(pool_region).initiate_auth(
-            ClientId=client_id,
-            AuthFlow="USER_PASSWORD_AUTH",
-            AuthParameters=auth_params,
+        wl = WarrantLite(
+            username=username.strip(),
+            password=password,
+            pool_id=pool_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            client=_boto_client(pool_region),
         )
+
+        resp = wl.authenticate_user()
     except Exception as exc:
-        raise WinixAuthError(f"Winix login failed: {exc}") from exc
+        raise WinixAuthError(f"Winix SRP login failed: {exc}") from exc
 
     auth_result = _require_authentication_result(resp, require_refresh=True)
     access_token = auth_result["AccessToken"]
@@ -169,7 +174,7 @@ def _jwt_claims(token: str) -> dict[str, Any]:
             raise WinixAuthError("JWT token format is invalid")
 
         payload = parts[1]
-        payload += "=" * (-len(payload) % 4)  # base64 padding
+        payload += "=" * (-len(payload) % 4)
         decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
         claims = json.loads(decoded.decode("utf-8"))
 

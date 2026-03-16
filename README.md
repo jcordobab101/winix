@@ -36,7 +36,7 @@ pip install -e .
 
 # Requirements
 
-- Python **3.10+**
+- Python **3.11+**
 - boto3
 - requests
 - python-dotenv

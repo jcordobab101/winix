@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import requests
 
-from winix import auth
+from . import auth
 
 
 DEFAULT_TIMEOUT_SECONDS = float(os.getenv("WINIX_HTTP_TIMEOUT_SECONDS", "15"))
@@ -46,9 +46,6 @@ class WinixAccount:
         self.timeout_seconds = float(timeout_seconds)
 
     def check_access_token(self) -> None:
-        """
-        Register the Cognito token with the Winix backend again.
-        """
         payload = {
             "cognitoClientSecretKey": auth.COGNITO_CLIENT_SECRET_KEY,
             "accessToken": self.access_token,
@@ -99,10 +96,6 @@ class WinixAccount:
         return devices
 
     def register_user(self, email: str) -> None:
-        """
-        Register the logged-in android login/android user uuid with the backend.
-        Call this after getting a Cognito token but before check_access_token.
-        """
         if not isinstance(email, str) or not email.strip():
             raise WinixDriverError("email must be a non-empty string")
 
@@ -123,10 +116,6 @@ class WinixAccount:
         )
 
     def get_uuid(self) -> str:
-        """
-        Construct a fake secure Android ID using the token subject:
-        CRC32("github.com/hfern/winixctl" + userid) + CRC32("HGF" + userid)
-        """
         if self._uuid is None:
             claims = _jwt_claims(self.access_token)
             user_id = str(claims.get("sub", "")).strip()
@@ -152,7 +141,7 @@ class WinixAccount:
 
         if response.status_code != 200:
             raise WinixRequestError(
-                f"Error while performing RPC {rpc_name} ({response.status_code}): {response.text}"
+                f"{rpc_name} failed with HTTP {response.status_code}: {response.text}"
             )
 
         try:
@@ -198,11 +187,11 @@ class WinixDevice:
         "air_quality": {"good": "01", "fair": "02", "poor": "03"},
     }
 
-    def __init__(self, id: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS):
-        if not isinstance(id, str) or not id.strip():
-            raise WinixDriverError("device id must be a non-empty string")
+    def __init__(self, device_id: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS):
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise WinixDriverError("device_id must be a non-empty string")
 
-        self.id = id.strip()
+        self.id = device_id.strip()
         self.timeout_seconds = float(timeout_seconds)
 
     def off(self) -> None:
@@ -248,7 +237,7 @@ class WinixDevice:
 
         if response.status_code != 200:
             raise WinixRequestError(
-                f"Device control failed ({response.status_code}): {response.text}"
+                f"Device control failed with HTTP {response.status_code}: {response.text}"
             )
 
     def get_state(self) -> dict[str, Any]:
@@ -261,7 +250,7 @@ class WinixDevice:
 
         if response.status_code != 200:
             raise WinixRequestError(
-                f"Device state request failed ({response.status_code}): {response.text}"
+                f"Device state request failed with HTTP {response.status_code}: {response.text}"
             )
 
         try:
