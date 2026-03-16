@@ -13,6 +13,15 @@ from . import auth
 
 
 DEFAULT_TIMEOUT_SECONDS = float(os.getenv("WINIX_HTTP_TIMEOUT_SECONDS", "15"))
+DEBUG_WINIX = (os.getenv("WINIX_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"})
+WINIX_SECURITY_KEY = (
+    os.getenv("WINIX_SECURITY_KEY")
+    or auth.COGNITO_CLIENT_SECRET_KEY
+)
+WINIX_MOBILE_LANG = os.getenv("WINIX_MOBILE_LANG", "en").strip() or "en"
+WINIX_OS_TYPE = os.getenv("WINIX_OS_TYPE", "android").strip() or "android"
+WINIX_OS_VERSION = os.getenv("WINIX_OS_VERSION", "29").strip() or "29"
+WINIX_CHECK_OS_VERSION = os.getenv("WINIX_CHECK_OS_VERSION", "26").strip() or "26"
 
 
 class WinixDriverError(RuntimeError):
@@ -44,17 +53,25 @@ class WinixAccount:
         self._uuid: Optional[str] = None
         self.access_token = access_token.strip()
         self.timeout_seconds = float(timeout_seconds)
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "User-Agent": "okhttp/4.9.0",
+            }
+        )
 
-    def check_access_token(self) -> None:
+    def check_access_token(self) -> dict[str, Any]:
         payload = {
-            "cognitoClientSecretKey": auth.COGNITO_CLIENT_SECRET_KEY,
+            "cognitoClientSecretKey": WINIX_SECURITY_KEY,
             "accessToken": self.access_token,
             "uuid": self.get_uuid(),
-            "osVersion": "26",
-            "mobileLang": "en",
+            "osVersion": WINIX_CHECK_OS_VERSION,
+            "mobileLang": WINIX_MOBILE_LANG,
         }
 
-        self._post_json(
+        return self._post_json(
             "https://us.mobile.winix-iot.com/checkAccessToken",
             payload,
             rpc_name="checkAccessToken",
@@ -95,25 +112,59 @@ class WinixAccount:
 
         return devices
 
-    def register_user(self, email: str) -> None:
+    def register_user(self, email: str) -> dict[str, Any]:
         if not isinstance(email, str) or not email.strip():
             raise WinixDriverError("email must be a non-empty string")
 
-        payload = {
-            "cognitoClientSecretKey": auth.COGNITO_CLIENT_SECRET_KEY,
-            "accessToken": self.access_token,
-            "uuid": self.get_uuid(),
-            "email": email.strip(),
-            "osType": "android",
-            "osVersion": "29",
-            "mobileLang": "en",
-        }
+        email = email.strip()
 
-        self._post_json(
-            "https://us.mobile.winix-iot.com/registerUser",
-            payload,
-            rpc_name="registerUser",
-        )
+        attempts = [
+            {
+                "cognitoClientSecretKey": WINIX_SECURITY_KEY,
+                "accessToken": self.access_token,
+                "uuid": self.get_uuid(),
+                "email": email,
+                "osType": WINIX_OS_TYPE,
+                "osVersion": WINIX_OS_VERSION,
+                "mobileLang": WINIX_MOBILE_LANG,
+            },
+            {
+                "cognitoClientSecretKey": WINIX_SECURITY_KEY,
+                "accessToken": self.access_token,
+                "uuid": self.get_uuid(),
+                "email": email,
+                "osType": "android",
+                "osVersion": "26",
+                "mobileLang": WINIX_MOBILE_LANG,
+            },
+            {
+                "cognitoClientSecretKey": WINIX_SECURITY_KEY,
+                "accessToken": self.access_token,
+                "uuid": self.get_uuid(),
+                "email": email,
+                "osType": "android",
+                "osVersion": "29",
+                "mobileLang": WINIX_MOBILE_LANG,
+            },
+        ]
+
+        last_error: Optional[Exception] = None
+
+        for i, payload in enumerate(attempts, start=1):
+            try:
+                if DEBUG_WINIX:
+                    print(f"[WINIX DEBUG] registerUser attempt={i}")
+                return self._post_json(
+                    "https://us.mobile.winix-iot.com/registerUser",
+                    payload,
+                    rpc_name=f"registerUser attempt {i}",
+                )
+            except Exception as exc:
+                last_error = exc
+                if DEBUG_WINIX:
+                    print(f"[WINIX DEBUG] registerUser attempt={i} failed: {exc}")
+
+        raise WinixRequestError(f"registerUser failed after all attempts: {last_error}")
 
     def get_uuid(self) -> str:
         if self._uuid is None:
@@ -131,13 +182,20 @@ class WinixAccount:
 
     def _post_json(self, url: str, payload: dict[str, Any], *, rpc_name: str) -> dict[str, Any]:
         try:
-            response = requests.post(
+            response = self.session.post(
                 url,
                 json=payload,
                 timeout=self.timeout_seconds,
             )
         except requests.RequestException as exc:
             raise WinixRequestError(f"{rpc_name} request failed: {exc}") from exc
+
+        if DEBUG_WINIX:
+            print(f"[WINIX DEBUG] RPC={rpc_name}")
+            print(f"[WINIX DEBUG] URL={url}")
+            print(f"[WINIX DEBUG] PAYLOAD={json.dumps(payload, ensure_ascii=False)}")
+            print(f"[WINIX DEBUG] STATUS={response.status_code}")
+            print(f"[WINIX DEBUG] BODY={response.text}")
 
         if response.status_code != 200:
             raise WinixRequestError(
@@ -193,6 +251,13 @@ class WinixDevice:
 
         self.id = device_id.strip()
         self.timeout_seconds = float(timeout_seconds)
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "Accept": "application/json, text/plain, */*",
+                "User-Agent": "okhttp/4.9.0",
+            }
+        )
 
     def off(self) -> None:
         self._rpc_attr(self.category_keys["power"], self.state_keys["power"]["off"])
@@ -231,9 +296,14 @@ class WinixDevice:
         url = self.CTRL_URL.format(deviceid=self.id, attribute=attr, value=value)
 
         try:
-            response = requests.get(url, timeout=self.timeout_seconds)
+            response = self.session.get(url, timeout=self.timeout_seconds)
         except requests.RequestException as exc:
             raise WinixRequestError(f"Device control request failed: {exc}") from exc
+
+        if DEBUG_WINIX:
+            print(f"[WINIX DEBUG] CTRL URL={url}")
+            print(f"[WINIX DEBUG] CTRL STATUS={response.status_code}")
+            print(f"[WINIX DEBUG] CTRL BODY={response.text}")
 
         if response.status_code != 200:
             raise WinixRequestError(
@@ -244,9 +314,14 @@ class WinixDevice:
         url = self.STATE_URL.format(deviceid=self.id)
 
         try:
-            response = requests.get(url, timeout=self.timeout_seconds)
+            response = self.session.get(url, timeout=self.timeout_seconds)
         except requests.RequestException as exc:
             raise WinixRequestError(f"Device state request failed: {exc}") from exc
+
+        if DEBUG_WINIX:
+            print(f"[WINIX DEBUG] STATE URL={url}")
+            print(f"[WINIX DEBUG] STATE STATUS={response.status_code}")
+            print(f"[WINIX DEBUG] STATE BODY={response.text}")
 
         if response.status_code != 200:
             raise WinixRequestError(
